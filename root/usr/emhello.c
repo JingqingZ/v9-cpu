@@ -11,8 +11,8 @@ write(int f, char *s, int n)
 {
   while (n--)
     out(f, *s++);
-}  
-  
+}
+
 main()
 {
   write(1, "Hello world.\n", 13);
