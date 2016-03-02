@@ -1,18 +1,20 @@
 # v9-cpu
 
 ## 概述
-v9-cpu是一个假想的简单CPU，用于操作系统教学实验和练习．
+v9-cpu是一个假想的简单的32-bit RISC CPU，用于操作系统教学实验和练习．
 
 ## 寄存器组:
 总共有 9 个寄存器,其中 7 个为 32 位,2 个为 64 位(浮点寄存器)。本文档只针对 CPU
 进行描述,对于相关的硬件配套外设(例如中断控制器等)在此不做介绍。其中：
 
- - a, b, c : 三个通用寄存器
- - f, g 两个浮点寄存器,是用来进行各种指令操作的。
- - sp 为当前栈指针
- - pc 为程序计数器（指向下一条指令），其指向的内存内容（即具体的指令值）会放到ir中，给CPU解码并执行
- - tsp 为栈顶指针(本 CPU 的栈是从顶部往底部增长)
- - flags 为状态寄存器(包括当前的运行模式,是否中断使能,是否有自陷,以及是否使用虚拟地址等)。
+ - a, b, c : 三个32-bit通用寄存器
+ - f, g 两个64-bit浮点寄存器,是用来进行各种指令操作的
+ - sp 为当前栈底指针，按64-bit(8字节)对齐
+   - usp: user stack，在用户态,sp是usp
+   - ssp: kernel stack，在内核台，sp是ksp,用户态应用不可见ssp
+ - pc 为32-bit程序计数器（指向下一条指令），按32-bit(4字节)对齐，其指向的内存内容（即具体的指令值）会放到ir中，给CPU解码并执行
+ - tsp 为栈顶指针(本 CPU 的栈是从顶部往底部增长),按64-bit(8字节)对齐
+ - flags 为内部状态寄存器(包括当前的运行模式,是否中断使能,是否有自陷,以及是否使用虚拟地址等)，可通过特定指令访问相关bit
  
  
 
@@ -25,135 +27,325 @@ v9-cpu是一个假想的简单CPU，用于操作系统教学实验和练习．
  
 ## 指令集
 
-总共有209条指令,具体的命令在指令的低8位,高24位为操作数。对于具体的命令,
-其中4条既不需要操作数,也不需要当前的CPU信息;还有92条也不需要操作数,但需要当
-前CPU的信息;剩下的113条命令,需要一个24位的操作数和当前的CPU信息。
+总共有209条指令,一条指令大小为32bit, 具体的命令编码在指令的低8位,高24位为操作数。
+但很多指令只是某一类指令的多种形式，很容易触类旁通。
 
-整体来看,指令分为三大类:运算比较指令、流程控制指令、装载卸载指令。另外还有其
-他的辅助指令:例如系统命令(例如 HALT,IDLE,RTI,BIN 等)、系统设置(例如 SSP,
-USP,IVEC, PDIR 等)、扩展函数库(NET 类,MCP 类等)。
+整体来看,指令分为如下几类:
+
+ - 运算指令：如ADD, SUB等
+ - 跳转指令：如JMP, JSR，LEV等
+ - 访存（Load/Store）指令：如LL, LBL, SL等
+ - 系统命令:如HALT, RTI, IDLE，SSP, USP,IVEC, PDIR，目的是为了操作系统设计
+ - 扩展函数库命令：如MCPY/MCMP/MCHR/MSET, MATH类，NET类，目的为了简化编译器设计
+
+按照指令对条件的需求，指令可分类如下：
+
+ - HALT, RTI, IDLE等，不需要立即数来参与，也不需要读取或修改寄存器值。
+ - ADD, MCPY，PSHA等，不需要立即数来参与，但需要读取或修改寄存器值。
+ - ADDI, S/L系列，B系列等，需要立即数和寄存器来参与。
+ 
 
 
 v9-cpu的指令集如下：
 
-### system
-- HALT, // halt system,
-- ENT,// sp += operand0
-- LEV, //  pc= *sp, sp + = operand0+8, 
-- JMP, // jump to operand0 offset, pc+=operand0
-- JMPI, // jump to operand0 + (a * sizeof(union insnfmt_t)) offset, pc+=operand0+a>>2
-- JSR,  // save current pc, *sp=pc, sp -= 8; jump to operand0 OR pc+=operand0. 
-- JSRA, // save current pc, *sp=pc, sp -= 8; jump to a reg,  pc+=(a * sizeof(union insnfmt_t)).
-- LEA, LEAG, // a = sp/pc + operand0
-- CYC, // a = current cycle related with pc.
-- MCPY, MCMP, MCHR, MSET, // memcpy/memcmp/memchr/memset(a, b, c)
 
-### load to register a
-a = *(uint/short/ushort/char/uchar/double/float *)addr
+### 显示格式
+```
+指令名字　指令值　　指令含义
+```
 
-- LL, LLS, LLH, LLC, LLB, LLD, LLF, // a=content(local_addr) ; local addr= operand0 + sp
-- LG, LGS, LGH, LGC, LGB, LGD, LGF, // a=content(global_addr) ; global_addr = operand0 + pc
-- LX, LXS, LXH, LXC, LXB, LXD, LXF, // a=content(virt_addr); virt_addr = vir2phy(operand0)
+### 指令集明细
 
-### load register b
-b = *(uint/short/ushort/char/uchar/double/float *)addr
+#### 指令值格式
+```
+0xiiiiiicc OR 0x......cc
+i --> 操作数　immediate OR operand0 (简称imme)
+. --> CPU解码不会用到高24位
+c --> 指令编码
+```
 
-- LBL, LBLS, LBLH, LBLC, LBLB, LBLD, LBLF, // b=content(local_addr) ; local addr= operand0 + sp
-- LBG, LBGS, LBGH, LBGC, LBGB, LBGD, LBGF, // b=content(global_addr) ; global_addr = operand0 + pc
-- LBX, LBXS, LBXH, LBXC, LBXB, LBXD, LBXF, // b=content(virt_addr); virt_addr = vir2phy(operand0)
+#### system
+```
+HALT	0xiiiiii00	halt system
 
+//可用于分配函数中的局部变量
+ENT		0xiiiiii01  sp += imme
+//用于函数返回
+LEV		0xiiiiii02  pc =  *sp,	sp += imme+8
 
-### load a immediate
-- LI, // a = operand0
-- LHI, // a = (a << 24) | ((uint)operand0 >> 8)
-- LIF, // f = operand0
+//跳转指令
+JMP		0xiiiiii03	pc += imme
+JMPI	0xiiiiii04	pc += imme+ra>>2
 
 
-### store register a to memory 
-*(uint/short/ushort/char/uchar/double/float *)addr = a
+//用于函数调用
+JSR		0xiiiiii05	*sp = pc,	sp -= 8,	pc += imme
+JSRA	0x......06	*sp = pc,	sp -= 8,	pc += ra
 
-- SL, SLH, SLB, SLD, SLF, // *(local_addr)=a; local_addr = operand0 + sp
-- SG, SGH, SGB, SGD, SGF, // *(global_addr)=a; global_addr = operand0 + pc
-- SX, SXH, SXB, SXD, SXF, // *(virt_addr)=a; virt_addr = vir2phy(operand0 + b)
-
-### arithmetic
-- ADDF, SUBF, MULF, DIVF, // floating point arithmetic: f = fx(f, g)
-- ADD, ADDI, ADDL, // a += b/operand0/(operand0 + sp)
-- SUB, SUBI, SUBL, // a -= b/operand0/(operand0 + sp)
-- MUL, MULI, MULL, // (int)a *= (int)b/(int)operand0/(int)(operand0 + sp)
-- DIV, DIVI, DIVL, // (int)a /= (int)b/(int)operand0/(int)(operand0 + sp)
-- DVU, DVUI, DVUL, // (uint)a /= (uint)b/(uint)operand0/(uint)(operand0 + sp)
-- MOD, MODI, MODL, // (int)a %= (int)b/(int)operand0/(int)(operand0 + sp)
-- MDU, MDUI, MDUL, // (uint)a %= (uint)b/(uint)operand0/(uint)(operand0 + sp)
-- AND, ANDI, ANDL, // a &= b/operand0/(operand0 + sp)
-- OR, ORI, ORL, // a |= b/operand0/(operand0 + sp)
-- XOR, XORI, XORL, // a ^= b/operand0/(operand0 + sp)
-- SHL, SHLI, SHLL, // a <<= b/operand0/(operand0 + sp)
-- SHR, SHRI, SHRL, // (int)a >>= (int)b/(int)operand0/(int)(operand0 + sp)
-- SRU, SRUI, SRUL, // (uint)a >>= (uint)b/(uint)operand0/(uint)(operand0 + sp)
-- EQ, EQF, // (a = a == b)/(a = f == g)
-- NE, NEF, // (a = a != b)/(a = f != g)
-- LT, LTU, LTF,// (a = (int/uint)a < (int/uint)b)/(a = f < g)
-- GE, GEU, GEF,// (a = (int/uint)a >= (int/uint)b)/(a = f >= g)
+LEA		0xiiiiii07	ra = sp+imme
+LEAG	0xiiiiii08	ra = pc+imme
+CYC		0x......09	ra = current cycle related with pc
 
 
-### conditional branch
-- BZ, BZF, // branch to operand0 if a/f is zero
-- BNZ, BNZF,  // branch to operand0 if a/f is non-zero
-- BE, BEF, // branch to operand0 if (a == b)/(f == g)
-- BNE, BNEF, // branch to operand0 if (a != b)/(f != g)
-- BLT, BLTU, BLTF, // branch to operand0 if ((int/uint)a < (int/uint)b)/(f < g)
-- BGE, BGEU, BGEF, // branch to operand0 if ((int/uint)a >= (int/uint)b)/f >= g)
+//内存块操作
+MCPY	0x......0a	memcpy(ra, rb, rc)
+MCMP	0x......0b	memcmp(ra, rb, rc)
+MCHR	0x......0c  memchr(ra, rb, rc)
+MSET	0x......0d	memset(ra, rb, rc)
+```
 
-### conversion
-- CID, // f = (int)a
-- CUD, // f = (uint)a
-- CDI, // a = (int)f
-- CDU, // a = (uint)f
+#### load to register a
+```
+LL		0xiiiiii0e	ra = *(*unit)  (sp+imme)
+LLS		0xiiiiii0f	ra = *(*short) (sp+imme)
+LLH		0xiiiiii10	ra = *(*ushort)(sp+imme)
+LLC		0xiiiiii11	ra = *(*char)  (sp+imme)
+LLB		0xiiiiii12	ra = *(*uchar) (sp+imme)
+LLD		0xiiiiii13	ra = *(*double)(sp+imme)
+LLF		0xiiiiii14	ra = *(*float) (sp+imme)
+LG		0xiiiiii15	ra = *(*unit)  (pc+imme)
+LGS		0xiiiiii16	ra = *(*short) (pc+imme)
+LGH		0xiiiiii17	ra = *(*ushort)(pc+imme)
+LGC		0xiiiiii18	ra = *(*char)  (pc+imme)
+LGB		0xiiiiii19	ra = *(*uchar) (pc+imme)
+LGD		0xiiiiii1a	ra = *(*double)(pc+imme)
+LGF		0xiiiiii1b	ra = *(*float) (pc+imme)
+LX		0xiiiiii1c	ra = *(*unit)  global_addr(ra+imme)
+LXS		0xiiiiii1d	ra = *(*short) global_addr(ra+imme)
+LXH		0xiiiiii1e	ra = *(*ushort)global_addr(ra+imme)
+LXC		0xiiiiii1f	ra = *(*char)  global_addr(ra+imme)
+LXB		0xiiiiii20	ra = *(*uchar) global_addr(ra+imme)
+LXD		0xiiiiii21	ra = *(*double)global_addr(ra+imme)
+LXF		0xiiiiii22	ra = *(*float) global_addr(ra+imme)
+LI		0xiiiiii23	ra = imme
+LHI		0xiiiiii24	ra = (ra<<24)|(imme>>8)
+LIF		0xiiiiii25	rf = double(imme)
+```
 
-### misc
-- CLI, // a = iena, iena = 0 -- clear interrupt flag, return orig val.
-- STI, // if generated by hardware: set trap, and process the interrupt;
-          else: iena = 1 -- set interrupt flag
-- RTI, // return from interrupt, set pc, sp, may switch user/kernel mode;
-          if has pending interrupt, process the interrupt
-- BIN, // a = kbchar -- kbchar is the value from outside io
-- BOUT, // a = write(a, &b, 1);
-- NOP, // no operation.
-- SSP, // ksp = a -- ksp is kernel sp
-- PSHA, // sp -= 8, *sp = a
-- PSHI, // sp -= 8, *sp = operand0
-- PSHF, // sp -= 8, *(double *)sp = f
-- PSHB, // sp -= 8, *sp = b
-- POPB, // b = *sp, sp += 8
-- POPF,  // f = *(double *)sp, sp += 8
-- POPA,  // a = *sp, sp += 8
-- IVEC, // ivec = a -- set interrupt vector by a
-- PDIR, // pdir = mem + a -- set page directory physical memory by a
-- SPAG, // paging = a -- enable/disable virtual memory feature by a
-- TIME, // if operand0 is 0: timeout = a -- set current timeout from a;
-           else: printk("timer%d=%u timeout=%u", operand0, timer, timeout)
-- LVAD, // a = vadr -- vadr is bad virtual address
-- TRAP, // trap = FSYS
-- LUSP, SUSP, // (a = usp)/(usp = a) -- usp is user stack pointer 
-- LCL,  // c = *(uint *)(sp + operand0)
-- LCA, // c = a
-- PSHC, POPC, // (sp -= 8, *sp = c)/(c = *sp, sp += 8)
-- MSIZ, // a = memsz -- move physical memory to a.
-- PSHG, POPG, // (sp -= 8, *sp = g)/(g = *sp, sp += 8)
+#### load to register b
+```
+LBL		0xiiiiii26	rb = *(*uint)  (sp+imme)
+LBLS	0xiiiiii27	rb = *(*short) (sp+imme)
+LBLH	0xiiiiii28	rb = *(*ushort)(sp+imme)
+LBLC	0xiiiiii29	rb = *(*char)  (sp+imme)
+LBLB	0xiiiiii2a	rb = *(*uchar) (sp+imme)
+LBLD	0xiiiiii2b	rb = *(*double)(sp+imme)
+LBLF	0xiiiiii2c	rb = *(*float) (sp+imme)
+LBG		0xiiiiii2d	rb = *(*uint)  (pc+imme)
+LBGS	0xiiiiii2e	rb = *(*short) (pc+imme)
+LBGH	0xiiiiii2f	rb = *(*ushort)(pc+imme)
+LBGC	0xiiiiii30	rb = *(*char)  (pc+imme)
+LBGB	0xiiiiii31	rb = *(*uchar) (pc+imme)
+LBGD	0xiiiiii32	rb = *(*double)(pc+imme)
+LBGF	0xiiiiii33	rb = *(*float) (pc+imme)
+LBX		0xiiiiii34	rb = *(*uint)  global_addr(rb+imme)
+LBXS	0xiiiiii35	rb = *(*short) global_addr(rb+imme)
+LBXH	0xiiiiii36	rb = *(*ushort)global_addr(rb+imme)
+LBXC	0xiiiiii37	rb = *(*char)  global_addr(rb+imme)
+LBXB	0xiiiiii38	rb = *(*uchar) global_addr(rb+imme)
+LBXD	0xiiiiii39	rb = *(*double)global_addr(rb+imme)
+LBXF	0xiiiiii3a	rb = *(*float) global_addr(rb+imme)
+LBI		0xiiiiii3b  rb = imme
+LBHI	0xiiiiii3c  rb = (rb<<24)|(imme>>8)
+LBIF	0xiiiiii3d  rb = double(imme)
+LBA		0x......3e  rb = ra
+LBAD    0x......3f  rg = rf
+```
 
-### math 
-f = fx(f)/fx(f, g)
+#### store register a to memory 
+```
+SL		0xiiiiii40	*(*uint)  (sp+imme) = (uint)  (ra)
+SLH		0xiiiiii41	*(*ushort)(sp+imme) = (ushort)(ra)
+SLB		0xiiiiii42	*(*uchar) (sp+imme) = (ushort)(ra)
+SLD		0xiiiiii43	*(*double)(sp+imme) = (double)(ra)
+SLF		0xiiiiii44	*(*float) (sp+imme) = (float) (ra)
+SG		0xiiiiii45	*(*uint)  (pc+imme) = (uint)  (ra)
+SGH		0xiiiiii46	*(*ushort)(pc+imme) = (ushort)(ra)
+SGB		0xiiiiii47	*(*uchar) (pc+imme) = (ushort)(ra)
+SGD		0xiiiiii48	*(*double)(pc+imme) = (double)(ra)
+SGF		0xiiiiii49	*(*float) (pc+imme) = (float) (ra)
+SX		0xiiiiii4a  *(*uint)  global_addr(rb+imme) = (uint)  (ra)
+SXH		0xiiiiii4b	*(*ushort)global_addr(rb+imme) = (ushort)(ra)
+SXB		0xiiiiii4c	*(*uchar) global_addr(rb+imme) = (ushort)(ra)
+SXD		0xiiiiii4d	*(*double)global_addr(rb+imme) = (double)(ra)
+SXF		0xiiiiii4e	*(*float) global_addr(rb+imme) = (float) (ra)
+```
 
-- POW, ATN2, FABS, ATAN, LOG, LOGT, EXP, FLOR, CEIL, HYPO, SIN, COS, TAN, ASIN,
-ACOS, SINH, COSH, TANH, SQRT, FMOD,
+#### arithmetic
+```
+ADDF	0x......4f	rf = rf+rg
+SUBF	0x......50	rf = rf-rg
+MULF	0x......51	rf = rf*rg
+DIVF	0x......52	rf = rf/rg
+ADD		0x......53  ra = ra+rb
+ADDI	0xiiiiii54	ra = ra+imme
+ADDL	0xiiiiii55	ra = ra+(*(int*)(sp+imme))
+SUB		0x......56  ra = ra-rb
+SUBI	0xiiiiii57	ra = ra-imme
+SUBL	0xiiiiii58	ra = ra-(sp+imme)
+MUL		0x......59	ra = (int)(ra)*(int)(rb)
+MULI	0xiiiiii5a	ra = (int)(ra)*(int)(imme)
+MULL	0xiiiiii5b	ra = (int)(ra)*(*(int*)(sp+imme))
+DIV		0x......5c	ra = (int)(ra)/(int)(rb)
+DIVI	0xiiiiii5d	ra = (int)(ra)/(int)(imme)
+DIVL	0xiiiiii5e	ra = (int)(ra)/(*(int*)(sp+imme))
+DVU		0x......5f	ra = (uint)(ra)/(uint)(rb)
+DVUI	0xiiiiii60	ra = (uint)(ra)/(uint)(imme)
+DVUL	0xiiiiii61	ra = (uint)(ra)/(*(uint*)(sp+imme))
+MOD		0x......62	ra = (int)(ra)%(int)(rb)
+MODI	0xiiiiii63	ra = (int)(ra)%(int)(imme)
+MODL	0xiiiiii64	ra = (int)(ra)%(*(int*)(sp+imme))
+MDU		0x......65	ra = (uint)(ra)%(uint)(rb)
+MDUI	0xiiiiii66	ra = (uint)(ra)%(uint)(imme)
+MDUL	0xiiiiii67	ra = (uint)(ra)%(*(uint*)(sp+imme))
+AND		0x......68	ra = ra&rb
+ANDI	0xiiiiii69	ra = ra&imme
+ANDL	0xiiiiii6a	ra = ra&(*(int*)(sp+imme))
+OR		0x......6b	ra = ra|rb
+ORI		0xiiiiii6c	ra = ra|imme
+ORL		0xiiiiii6d	ra = ra|(*(int*)(sp+imme))
+XOR		0x......6e	ra = ra^rb
+XORI	0xiiiiii6f	ra = ra^imme
+XORL	0xiiiiii70	ra = ra^(*(int*)(sp+imme))
+SHL		0x......71	ra = ra<<(uint)(rb)
+SHLI	0xiiiiii72	ra = ra<<(uint)(imme)
+SHLL	0xiiiiii73	ra = ra<<(*(uint*)(sp+imme))
+SHR		0x......74	ra = (int)(ra)>>(uint)(rb)
+SHRI	0xiiiiii75	ra = (int)(ra)>>(uint)(imme)
+SHRL	0xiiiiii76	ra = (int)(ra)>>(*(uint*)(sp+imme))
+SRU		0x......77	ra = (uint)(ra)>>(uint)(rb)
+SRUI	0xiiiiii78	ra = (uint)(ra)>>(uint)(imme)
+SRUL	0xiiiiii79	ra = (uint)(ra)>>(*(uint*)(sp+imme))
+EQ		0x......7a  ra = (ra == rb)
+EQF		0x......7b	ra = (rf == rg)
+NE		0x......7c	ra = (ra != rb)
+NEF		0x......7d	ra = (rf != rg)
+LT		0x......7e	ra = ((int)a < (int)b)
+LTU		0x......7f	ra = ((uint)a < (uint)b)
+LTF		0x......80	ra = (f < g)
+GE		0x......81	ra = ((int)a > (int)b)
+GEU		0x......82	ra = ((uint)a > (uint)b)
+GEF		0x......83	ra = (f > g)
+```
+#### conditional branch
+```
+BZ		0xiiiiii84	if (ra == 0)  pc = pc+imme
+BZF		0xiiiiii85	if (rf == 0)  pc = pc+imme
+BNZ		0xiiiiii86  if (ra != 0)  pc = pc+imme
+BNZF	0xiiiiii87	if (rf != 0)  pc = pc+imme
+BE		0xiiiiii88	if (ra == rb) pc = pc+imme
+BEF		0xiiiiii89	if (rf == rg) pc = pc+imme
+BNE		0xiiiiii8a  if (ra != rb) pc = pc+imme
+BNEF	0xiiiiii8b	if (rf != rg) pc = pc+imme
+BLT		0xiiiiii8c	if ((int)a < (int)b) pc = pc+imme
+BLTU	0xiiiiii8d	if ((uint)a < (uint)b) pc = pc+imme
+BLTF	0xiiiiii8e	if (f < g) pc = pc+imme
+BGE		0xiiiiii8f	if ((int)a < (int)b) pc = pc+imme
+BGEU	0xiiiiii90	if ((uint)a < (uint)b) pc = pc+imme
+BGEF	0xiiiiii91	if (f < g) pc = pc+imme
+```
 
-### cpu idle
-- IDLE // response hardware interrupt (include timer).
+#### conversion
+```
+CID		0x......92  f = (double)((int)a)
+CUD		0x......93	f = (double)((uint)a)
+CDI		0x......94	a = (int)(f)
+CDU		0x......95	a = (uint)(f)
+```
+
+#### misc
+```
+//屏蔽中断
+CLI		0x......96	a = iena,	iena = 0
+//使能中断
+STI		0x......97	if generated by hardware: set trap, and process the interrupt; else: iena = 1
+//中断返回
+RTI		0x......98	return from interrupt, POP fault code, pc, sp,  if fault code== USER, then switch to user mode; if has pending interrupt, process the interrupt
+//IO读写
+BIN		0x......99	a = kbchar,	kbchar is the value from outside io
+BOUT	0x......9a	a = write(a, &b, 1);
+
+NOP		0x......9b	no operation.
+
+SSP		0x......9c	ksp = a -- ksp is kernel sp
+PSHA	0x......9d	sp -= 8, *sp = a
+PSHI	0x......9e	sp -= 8, *sp = imme
+PSHF	0x......9f	sp -= 8, *(double *)sp = f
+PSHB	0x......a0	sp -= 8, *sp = b
+POPB	0x......a1	b = *sp, sp += 8
+POPF	0x......a2	f = *(double *)sp, sp += 8
+POPA	0x......a3	a = *sp, sp += 8
+
+//设置中断向量起始地址
+IVEC	0x......a4	ivec = a -- set interrupt vector by a
+//设置页目录表起始地址
+PDIR	0x......a5	pdir = a -- set page directory physical memory by a
+//设置页机制使能/屏蔽
+SPAG	0x......a6	paging = a -- enable/disable virtual memory feature by a
+//设置时钟到时值
+TIME	0xiiiiiia7	if operand0 is 0: timeout = a -- set current timeout from a; else: printk("timer%d=%u timeout=%u", operand0, timer, timeout)
+//获取访问异常的地址
+LVAD	0x......a8	a = vadr -- vadr is bad virtual address
+//陷入指令，常用于系统调用
+TRAP	0x......a9	trap = FSYS
+//获取用户态的sp值
+LUSP	0x......aa	a = usp	
+//设置用户态的sp值
+SUSP	0x......ab	usp = a -- usp is user stack pointer
+LCL		0xiiiiiiac	c = *(uint *)(sp + imme)
+LCA		0x......ad	c = a
+PSHC	0x......ae	sp -= 8, *sp = c
+POPC	0x......af	c = *sp, sp += 8
+//获取内存大小
+MSIZ 	0x......b0	a = memsz -- move physical memory to a.
+
+PSHG	0x......b1	sp -= 8, *sp = g
+POPG	0x......b2	g = *sp, sp += 8
+
+NET1	0xiiiiiib3	No use
+NET2	0xiiiiiib4	No use
+NET3	0xiiiiiib5	No use
+NET4	0xiiiiiib6	No use
+NET5	0xiiiiiib7	No use
+NET6	0xiiiiiib8	No use
+NET7	0xiiiiiib9	No use
+NET8	0xiiiiiiba	No use
+NET9	0xiiiiiibb	No use
+```
+
+#### math 
+```
+POW		0x......bc	rf = power(rf, rg)
+ATN2	0x......bd	rf = atan2(rf, rg)
+FABS	0x......be	rf = fabs(rf, rg)
+ATAN	0x......c0	rf = atan(rf)
+LOG 	0x......c1	rf = log(rf)
+LOGT	0x......c2	rf = log10(rf)
+EXP 	0x......c3	rf = exp(rf)
+FLOR	0x......c4	rf = floor(rf)
+CEIL	0x......c5	rf = ceil(rf)
+HYPO	0x......c6	rf = hypo(rf, rg)
+SIN 	0x......c7	rf = sin(rf)
+COS 	0x......c8	rf = cos(rf)
+TAN 	0x......c9	rf = tan(rf)
+ASIN	0x......ca	rf = asin(rf)
+ACOS	0x......cb	rf = acos(rf)
+SINH	0x......cc	rf = sinh(rf)
+COSH	0x......cd	rf = cosh(rf)
+TANH	0x......ce	rf = tanh(rf)
+SQRT	0x......cf	rf = sqrt(rf)
+FMOD	0x......d0	rf = fmod(rf, rg)
+```
+
+#### cpu idle
+```
+IDLE 	0x......d1	response hardware interrupt (include timer).
+```
 
 ## 内存
 缺省内存大小为128MB，可以通过启动参数"-m XXX"，设置为XXX MB大小．
 在TLB中，设置了4个1MB大小页转换表（page translation buffer array）
+
  - kernel read page translation table
  - kernel write page translation table
  - user read page translation table
@@ -190,6 +382,7 @@ tpage[tpages++] = v //v是page number
  - ivec: 中断向量的地址
  
 ### 中断/异常类型
+```
 - FMEM,          // bad physical address 
 - FTIMER,        // timer interrupt
 - FKEYBD,        // keyboard interrupt
@@ -201,19 +394,80 @@ tpage[tpages++] = v //v是page number
 - FWPAGE,        // page fault on write
 - FRPAGE,        // page fault on read
 - USER 　　　　      // user mode exception 
+```
 
 ### 设置中断向量
  - val --> a
  - IVEC // 如果在内核态，设置中断向量的地址ivec为a; 如果在用户态，产生FPRIV异常
 
 ### 中断/异常产生的处理
- - 如果终端产生了键盘输入，且iean=1，则ipend |= FKEYBD，0-->iena
- - 如果timer产生了timeout，且iean=1，则ipend |= FTIMER，0-->iena
- - 如果产生了其他异常，则会有相应的处理，
+对于中断，CPU在执行指令前进行判断，看是否有中断：
+
+ - 如果终端产生了键盘输入，且iena=1，则ipend |= FKEYBD，0-->iena
+ - 如果timer产生了timeout，且iena=1，则ipend |= FTIMER，0-->iena
  
- 然后，保存中断的地址到kkernel mode的sp中，pc会跳到中断向量的地址ivec处执行
- 
-　
+对于异常，即在执行某指令时出现了异常（非法访问内存，非法权限，算术异常等）,或者是陷入（trap）指令，则会有相应的处理
+
+ - 如果当前处于中断屏蔽状态(即iena=0)，则产生fatal错误；
+ - 对于异常，设置错误码为异常编码；对于陷入指令，设置错误码为FSYS
+
+然后是统一的善后处理：
+
+ - 如果当前处于用户态(user=1)，则sp=kernel_sp, tr=kernel_tr, tw=kernel_tw,  trap|=USER
+ - PUSH当前的pc到当前内核栈
+ - PUSH 错误码(fault code)到当前内核栈
+ - pc跳转中断向量的地址ivec
+
+
+## 应用二进制接口（application binary interface，ABI）
+ABI描述的内容包括：
+
+ - 数据类型的大小、布局和对齐;
+ - 调用约定（控制着函数的参数如何传送以及如何接受返回值），例如，是所有的参数都通过栈传递，还是部分参数通过寄存器传递；哪个寄存器用于哪个函数参数；通过栈传递的第一个函数参数是最先push到栈上还是最后；
+ - 系统调用的编码和一个应用如何向操作系统进行系统调用；
+ - 以及在一个完整的操作系统ABI中，执行文件的二进制格式、程序库等等。
+
+
+### 基本数据表示
+ - char：8-bit有符号字符类型
+ - uchar：8-bit无符号字符类型
+ - short：16-bit有符号短整数类型
+ - ushort:16-bit无符号短整数类型
+ - int:32-bit有符号整数类型
+ - uint：32-bit无符号整数类型
+ - float:32-bit浮点类型
+ - double:64-bit浮点类型
+ - pointer:32-bit指针类型
+
+### 对齐要求和字节序
+上述的的数据类型，只有当自然对齐的情况，才可以用标准的v9指令直接处理。v9-cpu采用小端（Little-Endian）格式，就是低位字节排放在内存的低地址端，高位字节排放在内存的高地址端。v9-cpu 要求栈对齐到8字节。
+
+
+### 函数调用约定
+####  常规参数传递
+v9-cpu ABI (应用程序二进制接口)约定了用栈来传递函数调用参数，所有的参数的都是占用8字节的空间，在调用前，把参数按从右至左的顺序进行压栈。
+
+#### 返回值传递
+在返回基本数据类型的情况下，寄存器 a 约定为传递返回值。
+
+### 执行文件的格式
+执行文件由文件头和文件体组成。其中，文件头的结构为：
+
+```
+struct { 
+ uint magic //0xC0DEF00D 文件的magic number 
+ uint bss　 //在v9-cpu执行时没有用到
+ uint entry //程序的执行入口地址
+ uint flags;//程序的数据段起始地址 
+} hdr;
+```
+> BSS是Block Started by Symbol的简称，指用来存放程序中未初始化的全局变量的一块内存区域
+
+执行文件体有两部分组成：
+
+ - text段：紧接在文件头后，代码段（code segment/text segment）通常是指用来存放程序执行代码的一块内存区域。这部分区域的大小在程序运行前就已经确定，
+ - data段:紧接在代码段后，数据段（data segment）通常是指用来存放程序中已初始化的全局变量的一块内存区域。数据段属于静态内存分配。
+
 ## CPU执行过程
 ### 一些变量的含义：
 主要集中在em.c的cpu()函数中
@@ -230,17 +484,16 @@ tpage[tpages++] = v //v是page number
  - xsp: sp在host内存中的值
  - tsp: sp在host内存中所在页的起始地址值
  - fsp: 辅助判断是否要经过tr/tw的分析
- - ssp:
- - usp:
- - cycle: 
- - xcycle:
- - timer:
- - timeout:
- -　detla:
+ - ssp: 内核态的栈指针
+ - usp: 用户态的栈指针
+ - cycle: 指令执行周期计数
+ - xcycle:　用于判断外设中断的执行频度，和调整最终的指令执行周期计数（需进一步明确?）
+ - timer: 当前时钟计时（和时间时间中断有关）
+ - timeout: 时钟周期，当timer>timeout时，产生时钟中断 
+ -　detla:　一次指令执行的时间，timer+=delta
  
  ###执行过程概述
  
- 1. 首先，读入os kernel文件到内存的底部，并把pc放置到os kernel文件指定的内存位置，
- 设置可用sp为　MEM_SZ-FS_SZ=124MB
- 1. 然后从os kernel文件的起始地址开始执行
+ 1. 以funcall程序为例，首先，读入执行文件的代码段＋数据段到内存的底部，并把pc放置到执行文件头中entry设置的内存位置， 设置可用sp为MEM_SZ-FS_SZ - 数据段和程序段（应该还包括BSS段）
+ 1. 然后从pc指向的起始地址开始执行
  1. 如果碰到异常或中断，则保存中断的地址，并跳到中断向量的地址ivec处执行
