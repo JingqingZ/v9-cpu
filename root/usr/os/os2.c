@@ -25,7 +25,7 @@ enum { // processor fault codes
   FIPAGE, // page fault on opcode fetch
   FWPAGE, // page fault on write
   FRPAGE, // page fault on read
-  USER=16 // user mode exception 
+  USER=16 // user mode exception
 };
 
 char pg_mem[6 * 4096]; // page dir + 4 entries + alignment
@@ -122,45 +122,45 @@ alltraps()
 setup_paging()
 {
   int i;
-  
+
   pg_dir = (int *)((((int)&pg_mem) + 4095) & -4096);
   pg0 = pg_dir + 1024;
   pg1 = pg0 + 1024;
   pg2 = pg1 + 1024;
   pg3 = pg2 + 1024;
-  
+
   pg_dir[0] = (int)pg0 | PTE_P | PTE_W | PTE_U;  // identity map 16M
   pg_dir[1] = (int)pg1 | PTE_P | PTE_W | PTE_U;
   pg_dir[2] = (int)pg2 | PTE_P | PTE_W | PTE_U;
   pg_dir[3] = (int)pg3 | PTE_P | PTE_W | PTE_U;
   for (i=4;i<1024;i++) pg_dir[i] = 0;
-  
+
   for (i=0;i<4096;i++) pg0[i] = (i<<12) | PTE_P | PTE_W | PTE_U;  // trick to write all 4 contiguous pages
-  
+
   pdir(pg_dir);
   spage(1);
 }
 
 main()
 {
-  int t, d; 
-  
+  int t, d;
+
   current = 0;
   ivec(alltraps);
-  
+
   asm(STI);
-  
+
   printf("test timer...");
   t = 0;
   stmr(10000);
   while (!current) t++;
   printf("(t=%d)...ok\n",t);
-  
+
   printf("test invalid instruction...");
 //  asm(_dd); // XXX find a better way
   asm(-1);
   printf("...ok\n");
-  
+
   printf("test bad physical address...");
   t = *(int *)0x20000000;
   printf("...ok\n");
@@ -168,7 +168,7 @@ main()
   printf("test divide by zero...");
   t = 10; d = 0; t /= d;
   printf("...ok\n");
-  
+
   printf("test paging...");
   // reposition stack within first 16M
   asm(LI, 4*1024*1024); // a = 4M
